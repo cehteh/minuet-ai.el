@@ -7,8 +7,8 @@
 
 ;; Experimental proof of concept for discussion #63.  A secondary chat model
 ;; summarizes the current buffer.  The result is cached and included in chat
-;; completion prompts; it is refreshed explicitly, on visiting a file, or after
-;; saving, never on every change.
+;; and FIM completion prompts; it is refreshed explicitly, on visiting a file,
+;; or after saving, never on every change.
 
 ;;; Code:
 
@@ -21,7 +21,7 @@
   :group 'minuet)
 
 (defcustom minuet-context-summary-enabled nil
-  "Whether to include a cached summary in chat completion prompts."
+  "Whether to include a cached summary in completion prompts."
   :type 'boolean)
 
 (defcustom minuet-context-summary-provider 'openai-compatible
@@ -69,7 +69,7 @@ repeat large portions of the source. Aim for approximately %d characters."
   :type 'string)
 
 (defcustom minuet-context-summary-completion-guidance
-  "Use the file summary only as supporting context. Be conservative: complete what the user has started at the cursor; preserve the existing style, names, types, control flow, and local patterns. Prefer a short completion or no completion over speculation. Do not invent new APIs, symbols, requirements, TODOs, or unrelated features. Only suggest code that is a reasonable continuation of the text immediately around the cursor and is supported by the file context."
+  "Use the file summary only as supporting context. Be conservative: complete what the user has started at the cursor; preserve the existing style, names, types, control flow, and local patterns."
   "Additional guidance included with cached summaries in completion prompts."
   :type 'string)
 
@@ -91,9 +91,7 @@ This is informational only; it does not invalidate the cached summary.")
   (apply #'minuet--log (apply #'format format-string args) nil))
 
 (defun minuet-context-summary--valid-p ()
-  "Return non-nil when a cached summary is available.
-The cache remains valid after edits; it is replaced only by a successful
-refresh or cleared when the minor mode is disabled."
+  "Return non-nil when a cached summary is available."
   (stringp minuet-context-summary--text))
 
 (defun minuet-context-summary--prompt ()
@@ -112,9 +110,7 @@ refresh or cleared when the minor mode is disabled."
         (plist-get (plist-get choice :delta) :content))))
 
 (defun minuet-context-summary--finish (buffer tick response)
-  "Install RESPONSE in BUFFER after a request started at TICK.
-TICK is retained for diagnostics only: edits made while the request runs do
-do not invalidate or discard the resulting summary."
+  "Install RESPONSE in BUFFER after a request started at TICK."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq minuet-context-summary--request nil)
@@ -152,18 +148,12 @@ do not invalidate or discard the resulting summary."
             :as 'string
             :then (lambda (response)
                     (with-current-buffer buffer
-                      (minuet-context-summary--log
-                       "Context summary raw response: %s" response)
                       (condition-case err
                           (let* ((parsed (json-parse-string
                                           response
                                           :object-type 'plist
                                           :array-type 'list))
                                  (text (minuet-context-summary--extract parsed)))
-                            (minuet-context-summary--log
-                             "Context summary parsed response: %S" parsed)
-                            (minuet-context-summary--log
-                             "Context summary extracted text: %S" text)
                             (minuet-context-summary--finish buffer tick text))
                         (error
                          (setq minuet-context-summary--request nil)
@@ -176,9 +166,7 @@ do not invalidate or discard the resulting summary."
 
 ;;;###autoload
 (defun minuet-context-summary-refresh ()
-  "Refresh the cached summary for the current buffer.
-The existing cache remains available while the asynchronous refresh runs and
-is replaced only if the new response contains text."
+  "Refresh the cached summary for the current buffer."
   (interactive)
   (when (and minuet-context-summary-enabled
              (not (process-live-p minuet-context-summary--request)))
@@ -194,21 +182,35 @@ is replaced only if the new response contains text."
   (when (and minuet-context-summary-enabled buffer-file-name)
     (minuet-context-summary-refresh)))
 
+(defun minuet-context-summary--format-context ()
+  "Return the cached summary and completion guidance for a prompt."
+  (format "<fileSummary>\n%s\n</fileSummary>\n\n<completionGuidance>\n%s\n</completionGuidance>"
+          minuet-context-summary--text
+          minuet-context-summary-completion-guidance))
+
 (defun minuet-context-summary--augment-chat-shot (original context options)
-  "Add the cached summary and conservative guidance to ORIGINAL's chat shot."
+  "Add the cached summary and guidance to ORIGINAL's chat shot."
   (let ((shots (funcall original context options)))
     (if (and minuet-context-summary-enabled
              (minuet-context-summary--valid-p)
              (consp shots))
-        (cons (format "<fileSummary>\n%s\n</fileSummary>\n\n<completionGuidance>\n%s\n</completionGuidance>\n\n%s"
-                      minuet-context-summary--text
-                      minuet-context-summary-completion-guidance
+        (cons (format "%s\n\n%s"
+                      (minuet-context-summary--format-context)
                       (car shots))
               (cdr shots))
       shots)))
 
+(defun minuet-context-summary--augment-fim-prompt (original context)
+  "Add the cached summary and guidance to an FIM prompt."
+  (if (and minuet-context-summary-enabled
+           (minuet-context-summary--valid-p))
+      (format "%s\n\n%s"
+              (minuet-context-summary--format-context)
+              (funcall original context))
+    (funcall original context)))
+
 (define-minor-mode minuet-context-summary-mode
-  "Use a cached secondary-model summary in Minuet chat prompts."
+  "Use a cached secondary-model summary in Minuet completion prompts."
   :group 'minuet-context-summary
   :lighter " Sum"
   (if minuet-context-summary-mode
@@ -217,10 +219,14 @@ is replaced only if the new response contains text."
         (add-hook 'after-save-hook #'minuet-context-summary--refresh-after-save nil t)
         (advice-add 'minuet--make-chat-llm-shot :around
                     #'minuet-context-summary--augment-chat-shot)
+        (advice-add 'minuet--default-fim-prompt-function :around
+                    #'minuet-context-summary--augment-fim-prompt)
         (minuet-context-summary-refresh))
     (remove-hook 'after-save-hook #'minuet-context-summary--refresh-after-save t)
     (advice-remove 'minuet--make-chat-llm-shot
                    #'minuet-context-summary--augment-chat-shot)
+    (advice-remove 'minuet--default-fim-prompt-function
+                   #'minuet-context-summary--augment-fim-prompt)
     (when (process-live-p minuet-context-summary--request)
       (delete-process minuet-context-summary--request))
     (setq minuet-context-summary--request nil
