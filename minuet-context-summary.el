@@ -43,20 +43,34 @@ Summary generation can be considerably slower than completion requests."
   '(:model "qwen2.5-coder:7b"
     :end-point "http://localhost:11434/v1/chat/completions"
     :api-key "TERM"
-    :system "You summarize source files for a code completion assistant."
+    :system "You produce compact, factual source-file context for a code-completion model."
     :optional nil)
   "Secondary chat-model configuration used for summaries.
 `:api-key' names an environment variable, just like Minuet provider options."
   :type 'plist)
 
 (defcustom minuet-context-summary-prompt
-  "Summarize this source file for another code-completion model.
+  "Analyze this source file as persistent context for an inline code-completion model.
 
-Include the file's purpose, important symbols, data flow, invariants,
-interfaces, dependencies visible in the file, and conventions to preserve.
-Be factual and concise. Aim for approximately %d characters, but prioritize
-useful information over the exact length. Do not use markdown fences."
+Return only a compact, factual summary with exactly these sections:
+
+OVERVIEW: one very terse sentence describing what this file is about.
+STRUCTURE: describe the overall organization and what is already present;
+mention important modules, types, functions, methods, state, and data flow.
+NOTES: list TODO, FIXME, HACK, WIP, XXX, BUG, and similar markers found in
+comments, preserving their meaning and location when possible. Write NONE if
+there are no such markers.
+
+Be useful for predicting completions, not for explaining the file to a human.
+Mention only facts supported by the source. Do not invent missing APIs,
+requirements, behavior, or planned work. Do not include markdown fences or
+repeat large portions of the source. Aim for approximately %d characters."
   "Prompt sent to the summary model."
+  :type 'string)
+
+(defcustom minuet-context-summary-completion-guidance
+  "Use the file summary only as supporting context. Be conservative: complete what the user has started at the cursor; preserve the existing style, names, types, control flow, and local patterns. Prefer a short completion or no completion over speculation. Do not invent new APIs, symbols, requirements, TODOs, or unrelated features. Only suggest code that is a reasonable continuation of the text immediately around the cursor and is supported by the file context."
+  "Additional guidance included with cached summaries in completion prompts."
   :type 'string)
 
 (defvar-local minuet-context-summary--text nil)
@@ -100,7 +114,7 @@ refresh or cleared when the minor mode is disabled."
 (defun minuet-context-summary--finish (buffer tick response)
   "Install RESPONSE in BUFFER after a request started at TICK.
 TICK is retained for diagnostics only: edits made while the request runs do
-not invalidate or discard the resulting summary."
+do not invalidate or discard the resulting summary."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq minuet-context-summary--request nil)
@@ -181,13 +195,15 @@ is replaced only if the new response contains text."
     (minuet-context-summary-refresh)))
 
 (defun minuet-context-summary--augment-chat-shot (original context options)
-  "Add the cached summary to the chat shot returned by ORIGINAL."
+  "Add the cached summary and conservative guidance to ORIGINAL's chat shot."
   (let ((shots (funcall original context options)))
     (if (and minuet-context-summary-enabled
              (minuet-context-summary--valid-p)
              (consp shots))
-        (cons (format "<fileSummary>\n%s\n</fileSummary>\n\n%s"
-                      minuet-context-summary--text (car shots))
+        (cons (format "<fileSummary>\n%s\n</fileSummary>\n\n<completionGuidance>\n%s\n</completionGuidance>\n\n%s"
+                      minuet-context-summary--text
+                      minuet-context-summary-completion-guidance
+                      (car shots))
               (cdr shots))
       shots)))
 
