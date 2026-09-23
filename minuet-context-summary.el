@@ -107,9 +107,9 @@ useful information over the exact length. Do not use markdown fences."
          (tick (buffer-chars-modified-tick))
          (buffer (current-buffer))
          (body `(:model ,(plist-get options :model)
-                 :stream :json-false
+                 :stream json-false
                  :messages [(:role "system" :content
-                                      ,(plist-get options :system))
+                                  ,(plist-get options :system))
                             (:role "user" :content ,(minuet-context-summary--prompt))]
                  ,@(plist-get options :optional)))
          (headers `(("Content-Type" . "application/json")
