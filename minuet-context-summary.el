@@ -106,8 +106,10 @@ useful information over the exact length. Do not use markdown fences."
          (endpoint (plist-get options :end-point))
          (tick (buffer-chars-modified-tick))
          (buffer (current-buffer))
+         ;; Do not include a `:stream' member.  `json-serialize' represents
+         ;; JSON false differently across supported Emacs versions, while an
+         ;; omitted OpenAI `stream' option defaults to false.
          (body `(:model ,(plist-get options :model)
-                 :stream json-false
                  :messages [(:role "system" :content
                                   ,(plist-get options :system))
                             (:role "user" :content ,(minuet-context-summary--prompt))]
