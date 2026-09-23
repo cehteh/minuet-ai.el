@@ -34,8 +34,9 @@ The PoC currently supports `openai-compatible'."
 This is a prompt hint, not a hard limit."
   :type 'integer)
 
-(defcustom minuet-context-summary-request-timeout 30
-  "Maximum time in seconds for a summary request."
+(defcustom minuet-context-summary-request-timeout 60
+  "Maximum time in seconds for a summary request.
+Summary generation can be considerably slower than completion requests."
   :type 'number)
 
 (defcustom minuet-context-summary-openai-compatible-options
