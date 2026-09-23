@@ -7,8 +7,13 @@
 
 ;; Experimental proof of concept for discussion #63.  A secondary chat model
 ;; summarizes the current buffer.  The result is cached and included in chat
-;; and FIM completion prompts; it is refreshed explicitly, on visiting a file,
-;; or after saving, never on every change.
+;; completion prompts; it is refreshed explicitly, on visiting a file, or
+;; after saving, never on every change.
+;;
+;; The summary prompt is a single customizable prompt.  Summary-specific
+;; completion guidance is intentionally not maintained separately from it.
+;; FIM completion is never modified: FIM models must receive only their native
+;; prefix/suffix request and must not receive summaries or chat prompts.
 
 ;;; Code:
 
@@ -21,7 +26,7 @@
   :group 'minuet)
 
 (defcustom minuet-context-summary-enabled nil
-  "Whether to include a cached summary in completion prompts."
+  "Whether to include a cached summary in chat completion prompts."
   :type 'boolean)
 
 (defcustom minuet-context-summary-provider 'openai-compatible
@@ -61,16 +66,15 @@ NOTES: list TODO, FIXME, HACK, WIP, XXX, BUG, and similar markers found in
 comments, preserving their meaning and location when possible. Write NONE if
 there are no such markers.
 
-Be useful for predicting completions, not for explaining the file to a human.
-Mention only facts supported by the source. Do not invent missing APIs,
-requirements, behavior, or planned work. Do not include markdown fences or
-repeat large portions of the source. Aim for approximately %d characters."
-  "Prompt sent to the summary model."
-  :type 'string)
+Use the file summary only as supporting context. Be conservative: completions
+must follow what the user has started at the cursor and preserve existing style,
+names, types, control flow, and local patterns. Mention only facts supported by
+the source. Do not invent missing APIs, requirements, behavior, or planned work.
+Do not include markdown fences or repeat large portions of the source. Aim for
+approximately %d characters."
+  "Single prompt sent to the summary model.
 
-(defcustom minuet-context-summary-completion-guidance
-  "Use the file summary only as supporting context. Be conservative: complete what the user has started at the cursor; preserve the existing style, names, types, control flow, and local patterns."
-  "Additional guidance included with cached summaries in completion prompts."
+The `%d' placeholder is replaced with `minuet-context-summary-target-length'."
   :type 'string)
 
 (defvar-local minuet-context-summary--text nil)
@@ -183,13 +187,12 @@ This is informational only; it does not invalidate the cached summary.")
     (minuet-context-summary-refresh)))
 
 (defun minuet-context-summary--format-context ()
-  "Return the cached summary and completion guidance for a prompt."
-  (format "<fileSummary>\n%s\n</fileSummary>\n\n<completionGuidance>\n%s\n</completionGuidance>"
-          minuet-context-summary--text
-          minuet-context-summary-completion-guidance))
+  "Return the cached summary for a completion prompt."
+  (format "<fileSummary>\n%s\n</fileSummary>"
+          minuet-context-summary--text))
 
 (defun minuet-context-summary--augment-chat-shot (original context options)
-  "Add the cached summary and guidance to ORIGINAL's chat shot."
+  "Add the cached summary to ORIGINAL's chat shot."
   (let ((shots (funcall original context options)))
     (if (and minuet-context-summary-enabled
              (minuet-context-summary--valid-p)
@@ -200,17 +203,8 @@ This is informational only; it does not invalidate the cached summary.")
               (cdr shots))
       shots)))
 
-(defun minuet-context-summary--augment-fim-prompt (original context)
-  "Add the cached summary and guidance to an FIM prompt."
-  (if (and minuet-context-summary-enabled
-           (minuet-context-summary--valid-p))
-      (format "%s\n\n%s"
-              (minuet-context-summary--format-context)
-              (funcall original context))
-    (funcall original context)))
-
 (define-minor-mode minuet-context-summary-mode
-  "Use a cached secondary-model summary in Minuet completion prompts."
+  "Use a cached secondary-model summary in Minuet chat completion prompts."
   :group 'minuet-context-summary
   :lighter " Sum"
   (if minuet-context-summary-mode
@@ -219,14 +213,10 @@ This is informational only; it does not invalidate the cached summary.")
         (add-hook 'after-save-hook #'minuet-context-summary--refresh-after-save nil t)
         (advice-add 'minuet--make-chat-llm-shot :around
                     #'minuet-context-summary--augment-chat-shot)
-        (advice-add 'minuet--default-fim-prompt-function :around
-                    #'minuet-context-summary--augment-fim-prompt)
         (minuet-context-summary-refresh))
     (remove-hook 'after-save-hook #'minuet-context-summary--refresh-after-save t)
     (advice-remove 'minuet--make-chat-llm-shot
                    #'minuet-context-summary--augment-chat-shot)
-    (advice-remove 'minuet--default-fim-prompt-function
-                   #'minuet-context-summary--augment-fim-prompt)
     (when (process-live-p minuet-context-summary--request)
       (delete-process minuet-context-summary--request))
     (setq minuet-context-summary--request nil
