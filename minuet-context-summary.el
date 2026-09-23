@@ -59,7 +59,9 @@ useful information over the exact length. Do not use markdown fences."
   :type 'string)
 
 (defvar-local minuet-context-summary--text nil)
-(defvar-local minuet-context-summary--tick nil)
+(defvar-local minuet-context-summary--tick nil
+  "Modification tick recorded when the cached summary was generated.
+This is informational only; it does not invalidate the cached summary.")
 (defvar-local minuet-context-summary--request nil)
 
 (defun minuet-context-summary--api-key (value)
@@ -69,11 +71,15 @@ useful information over the exact length. Do not use markdown fences."
         ((stringp value) value)
         (t nil)))
 
+(defun minuet-context-summary--log (format-string &rest args)
+  "Log a context-summary diagnostic using Minuet's log buffer."
+  (apply #'minuet--log (apply #'format format-string args) nil))
+
 (defun minuet-context-summary--valid-p ()
-  "Return non-nil when the cached summary belongs to this buffer state."
-  (and (stringp minuet-context-summary--text)
-       minuet-context-summary--tick
-       (= minuet-context-summary--tick (buffer-chars-modified-tick))))
+  "Return non-nil when a cached summary is available.
+The cache remains valid after edits; it is replaced only by a successful
+refresh or cleared when the minor mode is disabled."
+  (stringp minuet-context-summary--text))
 
 (defun minuet-context-summary--prompt ()
   "Build the summary request prompt from the current buffer."
@@ -83,20 +89,26 @@ useful information over the exact length. Do not use markdown fences."
           (buffer-substring-no-properties (point-min) (point-max))))
 
 (defun minuet-context-summary--extract (json)
-  "Extract assistant text from OpenAI-compatible response JSON."
+  "Extract assistant text from an OpenAI-compatible response JSON object."
   (when-let* ((choices (plist-get json :choices))
-              (choice (car choices))
-              (message (plist-get choice :message)))
-    (plist-get message :content)))
+              (choice (car choices)))
+    (or (plist-get (plist-get choice :message) :content)
+        (plist-get choice :text)
+        (plist-get (plist-get choice :delta) :content))))
 
 (defun minuet-context-summary--finish (buffer tick response)
-  "Install RESPONSE in BUFFER if it still has modification TICK."
+  "Install RESPONSE in BUFFER after a request started at TICK.
+TICK is retained for diagnostics only: edits made while the request runs do
+not invalidate or discard the resulting summary."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq minuet-context-summary--request nil)
-      (when (and response (= tick (buffer-chars-modified-tick)))
-        (setq minuet-context-summary--text response
-              minuet-context-summary--tick tick)))))
+      (if (stringp response)
+          (setq minuet-context-summary--text response
+                minuet-context-summary--tick tick)
+        (minuet-context-summary--log
+         "Context summary response contained no text; cache unchanged (started at tick %S)"
+         tick)))))
 
 (defun minuet-context-summary--request-openai-compatible ()
   "Request a summary using the configured OpenAI-compatible chat backend."
@@ -106,9 +118,6 @@ useful information over the exact length. Do not use markdown fences."
          (endpoint (plist-get options :end-point))
          (tick (buffer-chars-modified-tick))
          (buffer (current-buffer))
-         ;; Do not include a `:stream' member.  `json-serialize' represents
-         ;; JSON false differently across supported Emacs versions, while an
-         ;; omitted OpenAI `stream' option defaults to false.
          (body `(:model ,(plist-get options :model)
                  :messages [(:role "system" :content
                                   ,(plist-get options :system))
@@ -117,6 +126,9 @@ useful information over the exact length. Do not use markdown fences."
          (headers `(("Content-Type" . "application/json")
                     ("Accept" . "application/json")
                     ("Authorization" . ,(concat "Bearer " api-key)))))
+    (minuet-context-summary--log
+     "Context summary request started for %s at tick %S using %s"
+     (buffer-name buffer) tick endpoint)
     (setq minuet-context-summary--request
           (plz 'post endpoint
             :headers headers
@@ -124,22 +136,37 @@ useful information over the exact length. Do not use markdown fences."
             :body (json-serialize body)
             :as 'string
             :then (lambda (response)
-                    (let ((text (minuet-context-summary--extract
-                                 (json-parse-string response
-                                   :object-type 'plist :array-type 'list))))
-                      (minuet-context-summary--finish buffer tick text)))
+                    (with-current-buffer buffer
+                      (minuet-context-summary--log
+                       "Context summary raw response: %s" response)
+                      (condition-case err
+                          (let* ((parsed (json-parse-string
+                                          response
+                                          :object-type 'plist
+                                          :array-type 'list))
+                                 (text (minuet-context-summary--extract parsed)))
+                            (minuet-context-summary--log
+                             "Context summary parsed response: %S" parsed)
+                            (minuet-context-summary--log
+                             "Context summary extracted text: %S" text)
+                            (minuet-context-summary--finish buffer tick text))
+                        (error
+                         (setq minuet-context-summary--request nil)
+                         (minuet-context-summary--log
+                          "Context summary response parse error: %S" err)))))
             :else (lambda (err)
                     (setq minuet-context-summary--request nil)
-                    (minuet--log (format "Minuet context summary error: %s" err)))))))
+                    (minuet-context-summary--log
+                     "Context summary request error: %S" err))))))
 
 ;;;###autoload
 (defun minuet-context-summary-refresh ()
-  "Refresh the cached summary for the current buffer."
+  "Refresh the cached summary for the current buffer.
+The existing cache remains available while the asynchronous refresh runs and
+is replaced only if the new response contains text."
   (interactive)
   (when (and minuet-context-summary-enabled
              (not (process-live-p minuet-context-summary--request)))
-    (setq minuet-context-summary--text nil
-          minuet-context-summary--tick nil)
     (pcase minuet-context-summary-provider
       ('openai-compatible (minuet-context-summary--request-openai-compatible)))))
 
